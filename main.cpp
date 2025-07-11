@@ -5,8 +5,14 @@
 #include <ArduinoJson.h>
 #include <EEPROM.h>
 #include <driver/i2s.h>
+#include <SPI.h>
+#include <SD.h>
 #include <Adafruit_SSD1306.h>
 #include <Adafruit_GFX.h>
+#include <AudioFileSourceICYStream.h>
+#include <AudioFileSourceID3.h>
+#include <AudioGeneratorMP3.h>
+#include <AudioOutputI2S.h>
 
 // OLED Display Setup
 #define SCREEN_WIDTH 128
@@ -22,6 +28,7 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 #define I2S_DIN 32  // INMP441 data pin
 #define BUTTON_PIN 4 // Record button
 #define CONFIG_PIN 0 // Boot button for config mode
+#define SD_CS_PIN 5  // SD Card Chip Select
 
 // EEPROM Settings
 #define EEPROM_SIZE 2048
@@ -51,6 +58,7 @@ String base64_encode(const uint8_t* data, size_t input_length);
 void loadConfig();
 void saveConfig();
 void enterConfigMode();
+void setupSDCard();
 void setupAudioHardware();
 void connectToWiFi();
 void startRecording();
@@ -90,7 +98,7 @@ State currentState = STATE_INIT;
 String errorMessage = "";
 
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(9600);
   
   // Initialize OLED
   if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
@@ -99,6 +107,9 @@ void setup() {
   }
   displayStatus("Booting...");
   
+  // Initialize SD Card
+  setupSDCard();
+
   // Initialize EEPROM
   EEPROM.begin(EEPROM_SIZE);
   loadConfig();
@@ -163,6 +174,48 @@ void loop() {
     case STATE_WIFI_CONNECTED:
       if (millis() > stateEnterTime + 2000) { // Brief display of connection status
         displayStatus("Ready\nPress to record");
+        // Fetch and play short audio sample from web after WiFi connects
+        Serial.println("Fetching and playing short audio sample after WiFi connect...");
+        HTTPClient http;
+        String url = "https://www2.cs.uic.edu/~i101/SoundFiles/StarWars60.wav";
+        WiFiClientSecure *client = new WiFiClientSecure;
+        client->setInsecure();
+        http.begin(*client, url);
+        int httpCode = http.GET();
+        if (httpCode == HTTP_CODE_OK) {
+          WiFiClient* stream = http.getStreamPtr();
+          if (!stream || !stream->available()) {
+            Serial.println("Web audio stream unavailable");
+            http.end();
+            delete client;
+            break;
+          }
+          // Skip WAV header (typically 44 bytes)
+          for (int i = 0; i < 44 && stream->available(); i++) stream->read();
+          const size_t bufSize = 4096;
+          uint8_t* buf = (uint8_t*)malloc(bufSize);
+          if (!buf) {
+            Serial.println("Memory error for web audio buffer");
+            http.end();
+            delete client;
+            break;
+          }
+          size_t totalRead = 0;
+          unsigned long startTime = millis();
+          while (stream->available() && millis() - startTime < 5000) {
+            int len = stream->read(buf, bufSize);
+            if (len > 0) {
+              playAudio(buf, len);
+              totalRead += len;
+            }
+          }
+          free(buf);
+          Serial.printf("Played %u bytes from web audio after WiFi connect.\n", totalRead);
+        } else {
+          Serial.printf("Failed to fetch web audio after WiFi connect. HTTP code: %d\n", httpCode);
+        }
+        http.end();
+        delete client;
         currentState = STATE_READY;
       }
       break;
@@ -243,18 +296,43 @@ void enterConfigMode() {
       form { max-width: 500px; }
       input { width: 100%; padding: 8px; margin: 5px 0 15px; box-sizing: border-box; }
       input[type="submit"] { background: #4CAF50; color: white; border: none; padding: 12px; }
+      .graph { width: 100%; height: 80px; background: #eee; border: 1px solid #ccc; margin: 10px 0; }
+      .btn { background: #2196F3; color: white; border: none; padding: 10px 20px; margin: 5px; cursor: pointer; }
     </style>
+    <script>
+      function testRecord() {
+        fetch('/test_record').then(r => r.json()).then(data => {
+          let graph = document.getElementById('audioGraph');
+          graph.innerHTML = '';
+          let max = Math.max(...data.samples);
+          let min = Math.min(...data.samples);
+          let w = graph.offsetWidth;
+          let h = graph.offsetHeight;
+          let ctx = graph.getContext('2d');
+          ctx.clearRect(0,0,w,h);
+          ctx.beginPath();
+          for(let i=0;i<data.samples.length;i++){
+            let x = i * w / data.samples.length;
+            let y = h/2 - (data.samples[i] - min) * h/(max-min)/2;
+            if(i==0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+          }
+          ctx.strokeStyle = '#2196F3';
+          ctx.stroke();
+        });
+      }
+      function testPlay() {
+        fetch('/test_play');
+      }
+    </script>
     </head><body>
     <h1>ESP32 Voice Assistant Setup</h1>
     <form method='post' action='/save'>
     <h3>WiFi Networks</h3>
     )=====";
-    
     for (int i = 0; i < WIFI_MAX_NETWORKS; i++) {
       html += "<input type='text' name='ssid" + String(i+1) + "' placeholder='SSID " + String(i+1) + "' value='" + String(deviceConfig.ssids[i]) + "'><br>";
       html += "<input type='password' name='pass" + String(i+1) + "' placeholder='Password " + String(i+1) + "'><br>";
     }
-    
     html += R"=====(
     <h3>API Keys</h3>
     <input type='text' name='speech' placeholder='Google Speech API Key' value=')=====";
@@ -268,10 +346,107 @@ void enterConfigMode() {
     html += R"=====('><br>
     <input type='submit' value='Save & Reboot'>
     </form>
+    <h3>Test Voice Recording</h3>
+    <button class='btn' onclick='testRecord()'>Record & Show Graph</button>
+    <button class='btn' onclick='testPlay()'>Play Last Recording</button>
+    <button class='btn' onclick='playWebAudio()'>Play Web Audio Fragment</button><br>
+    <canvas id='audioGraph' class='graph'></canvas>
+    <script>
+      function playWebAudio() {
+        fetch('/play_web_audio');
+      }
+    </script>
     </body></html>
     )=====";
-    
+  // Play short web audio fragment endpoint
+  server.on("/play_web_audio", HTTP_GET, []() {
+    Serial.println("Play Web Audio button pressed: fetching and playing 5s fragment...");
+    HTTPClient http;
+    String url = "https://www2.cs.uic.edu/~i101/SoundFiles/StarWars60.wav";
+    WiFiClientSecure *client = new WiFiClientSecure;
+    client->setInsecure();
+    http.begin(*client, url);
+    int httpCode = http.GET();
+    if (httpCode == HTTP_CODE_OK) {
+      WiFiClient* stream = http.getStreamPtr();
+      const size_t bufSize = 4096;
+      uint8_t* buf = (uint8_t*)malloc(bufSize);
+      if (!buf) {
+        server.send(500, "text/plain", "Memory error");
+        http.end();
+        delete client;
+        return;
+      }
+      size_t totalRead = 0;
+      unsigned long startTime = millis();
+      while (stream->available() && millis() - startTime < 5000) {
+        int len = stream->read(buf, bufSize);
+        if (len > 0) {
+          playAudio(buf, len);
+          totalRead += len;
+        }
+      }
+      free(buf);
+      Serial.printf("Played %u bytes from web audio.\n", totalRead);
+      server.send(200, "text/plain", "Played web audio fragment");
+    } else {
+      server.send(500, "text/plain", "Failed to fetch audio");
+    }
+    http.end();
+    delete client;
+  });
     server.send(200, "text/html", html);
+  });
+
+  // Test record endpoint
+  server.on("/test_record", HTTP_GET, []() {
+    // Record 5 seconds of audio and return a small sample array for graph
+    const int testDurationMs = 5000;
+    const int sampleRate = SAMPLE_RATE;
+    const int totalSamples = sampleRate * testDurationMs / 1000;
+    uint8_t* testBuffer = (uint8_t*)malloc(totalSamples * 4); // 32-bit samples
+    if (!testBuffer) {
+      server.send(500, "application/json", "{\"error\":\"Memory error\"}");
+      return;
+    }
+    Serial.println("Test Record button pressed: recording 5 seconds...");
+    size_t bytes_read;
+    i2s_read(I2S_NUM_0, testBuffer, totalSamples * 4, &bytes_read, portMAX_DELAY);
+    // Downsample for graph (128 points)
+    const int graphSamples = 128;
+    String json = "{\"samples\": [";
+    for (int i = 0; i < graphSamples; i++) {
+      int idx = i * totalSamples / graphSamples;
+      int32_t sample = ((int32_t*)testBuffer)[idx];
+      json += String(sample);
+      if (i < graphSamples - 1) json += ",";
+    }
+    json += "]}";
+    free(testBuffer);
+    server.send(200, "application/json", json);
+  });
+
+  // Test play endpoint
+  server.on("/test_play", HTTP_GET, []() {
+    // Play last test recording (if any)
+    Serial.println("Test Play button pressed: playing last recording...");
+    File file = SD.open("/recording.b64");
+    if (!file) {
+      server.send(404, "text/plain", "No recording found");
+      return;
+    }
+    String b64 = file.readString();
+    file.close();
+    size_t decodedSize = calculateDecodedSize(b64.c_str());
+    uint8_t* decodedAudio = (uint8_t*)malloc(decodedSize);
+    if (!decodedAudio) {
+      server.send(500, "text/plain", "Memory error");
+      return;
+    }
+    int bytesDecoded = base64_decode(b64.c_str(), decodedAudio);
+    playAudio(decodedAudio, bytesDecoded);
+    free(decodedAudio);
+    server.send(200, "text/plain", "Playing");
   });
   
   server.on("/save", HTTP_POST, []() {
@@ -279,23 +454,36 @@ void enterConfigMode() {
     for (int i = 0; i < WIFI_MAX_NETWORKS; i++) {
       if (server.hasArg("ssid" + String(i+1))) {
         strncpy(deviceConfig.ssids[i], server.arg("ssid" + String(i+1)).c_str(), WIFI_CRED_MAX_LEN);
+        Serial.printf("SSID %d changed to: %s\n", i+1, deviceConfig.ssids[i]);
       }
       if (server.hasArg("pass" + String(i+1))) {
         strncpy(deviceConfig.passwords[i], server.arg("pass" + String(i+1)).c_str(), WIFI_CRED_MAX_LEN);
+        Serial.printf("Password %d changed.\n", i+1);
       }
     }
-    
     // Save API keys
-    if (server.hasArg("speech")) strncpy(deviceConfig.googleSpeechApiKey, server.arg("speech").c_str(), API_KEY_LEN);
-    if (server.hasArg("tts")) strncpy(deviceConfig.googleTtsApiKey, server.arg("tts").c_str(), API_KEY_LEN);
-    if (server.hasArg("gemini")) strncpy(deviceConfig.geminiApiKey, server.arg("gemini").c_str(), API_KEY_LEN);
-    
+    if (server.hasArg("speech")) {
+      strncpy(deviceConfig.googleSpeechApiKey, server.arg("speech").c_str(), API_KEY_LEN);
+      Serial.println("Google Speech API Key changed.");
+    }
+    if (server.hasArg("tts")) {
+      strncpy(deviceConfig.googleTtsApiKey, server.arg("tts").c_str(), API_KEY_LEN);
+      Serial.println("Google TTS API Key changed.");
+    }
+    if (server.hasArg("gemini")) {
+      strncpy(deviceConfig.geminiApiKey, server.arg("gemini").c_str(), API_KEY_LEN);
+      Serial.println("Gemini API Key changed.");
+    }
     saveConfig();
     server.send(200, "text/plain", "Configuration saved. Device will reboot.");
     delay(1000);
     ESP.restart();
   });
   
+  // Default 404 handler for unknown requests
+  server.onNotFound([]() {
+    server.send(404, "text/plain", "404: Not Found");
+  });
   server.begin();
 }
 
@@ -363,6 +551,39 @@ void setupAudioHardware() {
   Serial.println("Audio hardware initialized");
 }
 
+void setupSDCard() {
+  if(!SD.begin(SD_CS_PIN)){
+    displayStatus("SD Card Mount\nFailed");
+    Serial.println("Card Mount Failed");
+    delay(2000);
+    return;
+  }
+  uint8_t cardType = SD.cardType();
+
+  if(cardType == CARD_NONE){
+    displayStatus("No SD card\nattached");
+    Serial.println("No SD card attached");
+    delay(2000);
+    return;
+  }
+
+  String cardTypeStr;
+  if(cardType == CARD_MMC){
+    cardTypeStr = "MMC";
+  } else if(cardType == CARD_SD){
+    cardTypeStr = "SDSC";
+  } else if(cardType == CARD_SDHC){
+    cardTypeStr = "SDHC";
+  } else {
+    cardTypeStr = "UNKNOWN";
+  }
+  Serial.println("SD Card Type: " + cardTypeStr);
+  uint64_t cardSize = SD.cardSize() / (1024 * 1024);
+  Serial.printf("SD Card Size: %lluMB\n", cardSize);
+  displayStatus("SD Card OK\n" + cardTypeStr);
+  delay(1000);
+}
+
 void startRecording() {
   audioBufferSize = SAMPLE_RATE * RECORD_DURATION / 1000 * 4; // 32-bit samples
   audioBuffer = (uint8_t*)malloc(audioBufferSize);
@@ -398,23 +619,39 @@ void processSpeech() {
     return;
   }
   
+  displayStatus("Encoding audio...");
   HTTPClient http;
   http.begin("https://speech.googleapis.com/v1/speech:recognize?key=" + String(deviceConfig.googleSpeechApiKey));
   http.addHeader("Content-Type", "application/json");
   
   // Convert audio to base64
   String audioBase64 = base64_encode(audioBuffer, audioBufferSize);
+
+  // Save to SD card
+  displayStatus("Saving to SD...");
+  File file = SD.open("/recording.b64", FILE_WRITE);
+  if(!file){
+      Serial.println("Failed to open SD file for writing.");
+      displayStatus("SD Save Failed");
+      delay(1000);
+  } else {
+      if(!file.print(audioBase64)){
+          Serial.println("Write to SD file failed.");
+      }
+      file.close();
+  }
   free(audioBuffer);
   audioBuffer = nullptr;
   
   String payload = "{\"config\":{\"encoding\":\"LINEAR16\",\"sampleRateHertz\":" + String(SAMPLE_RATE) + 
                    ",\"languageCode\":\"en-US\"},\"audio\":{\"content\":\"" + audioBase64 + "\"}}";
   
+  displayStatus("Processing speech...");
   int httpCode = http.POST(payload);
   
   if (httpCode == HTTP_CODE_OK) {
     String response = http.getString();
-    DynamicJsonDocument doc(4096);
+    JsonDocument doc;
     DeserializationError error = deserializeJson(doc, response);
     
     if (!error && doc["results"].is<JsonArray>()) {
@@ -451,7 +688,7 @@ void queryGemini(const String& query) {
     JsonDocument doc;
     DeserializationError error = deserializeJson(doc, response);
     
-    if (!error && doc.containsKey("candidates")) {
+    if (!error && doc["candidates"].is<JsonArray>()) {
       const char* aiResponse = doc["candidates"][0]["content"]["parts"][0]["text"];
       Serial.print("AI Response: ");
       Serial.println(aiResponse);
@@ -480,10 +717,10 @@ void textToSpeech(const String& text) {
     
     if (httpCode == HTTP_CODE_OK) {
         String response = http.getString();
-        DynamicJsonDocument doc(4096);
+        JsonDocument doc;
         DeserializationError error = deserializeJson(doc, response);
         
-        if (!error && doc.containsKey("audioContent")) {
+        if (!error && doc["audioContent"].is<const char*>()) {
             const char* audioContent = doc["audioContent"];
             size_t decodedSize = calculateDecodedSize(audioContent);
             uint8_t* decodedAudio = (uint8_t*)malloc(decodedSize);
