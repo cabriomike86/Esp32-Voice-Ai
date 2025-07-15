@@ -631,7 +631,6 @@ void processSpeech() {
   // Stream file and encode base64 in chunks to avoid large memory usage
   const size_t chunkSize = 512;
   uint8_t buffer[chunkSize];
-  size_t bytesRead = 0;
 
   while ((bytesRead = file.read(buffer, chunkSize)) > 0) {
     audioBase64 += base64_encode(buffer, bytesRead);
