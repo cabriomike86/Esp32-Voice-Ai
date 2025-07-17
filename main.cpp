@@ -1,3 +1,5 @@
+
+#include <Arduino.h>
 #include <WiFi.h>
 #include <WiFiMulti.h>
 #include <WebServer.h>
@@ -7,10 +9,13 @@
 #include <driver/i2s.h>
 #include <Adafruit_SSD1306.h>
 #include <Adafruit_GFX.h>
+#include <Arduino_GFX_Library.h>
+
 #include <SD.h>
 #include <SPI.h>
 #include <FS.h>
-#include "Audio.h"
+//#include "Audio.h"
+#define BACKGROUND BLACK
 
 
 // OLED Display Setup
@@ -19,18 +24,26 @@
 #define OLED_RESET -1
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
+//Tft setup
+#define GFX_BL DF_GFX_BL  // default backlight pin, you may replace DF_GFX_BL to actual backlight pin
+#define TFT_BL 14
+//Arduino_GFX *gfx = create_default_Arduino_GFX();
+Arduino_DataBus* bus = new Arduino_ESP32SPI(11 /* DC */, 10 /* CS */, 12 /* SCK */, 13 /* MOSI */, GFX_NOT_DEFINED /* MISO */);
+Arduino_GFX* gfx = new Arduino_ST7789(bus, 1 /* RST */, 1 /* rotation */, true /* IPS */, 170 /* width */, 320 /* height */, 35 /* col offset 1 */, 0 /* row offset 1 */, 35 /* col offset 2 */, 0 /* row offset 2 */);
+
+
 // Audio Hardware Setup
-#define I2S_BCK 26    // MAX98357 BCK PIN
-#define I2S_DOUT 25   // MAX98357 DIN PIN
-#define I2S_LRC   22  // MAX98357 LRC PIN
+#define I2S_BCK 26   // MAX98357 BCK PIN
+#define I2S_DOUT 25  // MAX98357 DIN PIN
+#define I2S_LRC 22   // MAX98357 LRC PIN
 
-#define I2S_SD 12     // MAX98357 shutdown pin
+#define I2S_SD 12  // MAX98357 shutdown pin
 
-#define I2S_SCK 33    // INMP441 SCK PIN
-#define I2S_WS 27     // INMP441 WS Pin
-#define I2S_DIN 34    // INMP441 data pin
-#define BUTTON_PIN 4 // Record button
-#define CONFIG_PIN 14 // Boot button for config mode
+#define I2S_SCK 33     // INMP441 SCK PIN
+#define I2S_WS 27      // INMP441 WS Pin
+#define I2S_DIN 34     // INMP441 data pin
+#define BUTTON_PIN 4   // Record button
+#define CONFIG_PIN 14  // Boot button for config mode
 
 // SD Card Setup
 //#define REASSIGN_PINS
@@ -41,9 +54,9 @@ int cs = 5;
 #define SD_CS_PIN 5  // SD Card Chip Select
 // SD Card Setup
 #define SD_CS_PIN 5
-#define SPI_MOSI_PIN      23 
-#define SPI_MISO_PIN      19
-#define SPI_SCK_PIN       18
+#define SPI_MOSI_PIN 23
+#define SPI_MISO_PIN 19
+#define SPI_SCK_PIN 18
 
 // EEPROM Settings
 #define EEPROM_SIZE 2048
@@ -88,7 +101,7 @@ DeviceConfig deviceConfig;
 
 // Audio Settings
 const int SAMPLE_RATE = 44100;
-const int RECORD_DURATION = 5000; // 5 seconds
+const int RECORD_DURATION = 5000;  // 5 seconds
 uint8_t* audioBuffer = nullptr;
 size_t audioBufferSize = 0;
 bool isPlayingAudio = false;
@@ -117,14 +130,31 @@ bool isConfigModeActive = false;
 
 void setup() {
   Serial.begin(115200);
-  
+
+  // Reset TFT display pin manually
+  pinMode(1, OUTPUT);
+  digitalWrite(1, LOW);
+  delay(50);
+  digitalWrite(1, HIGH);
+  delay(50);
+
+  //init tft
+  gfx->begin();
+  gfx->fillScreen(BACKGROUND);
+
+#ifdef TFT_BL
+  pinMode(TFT_BL, OUTPUT);
+  digitalWrite(TFT_BL, HIGH);
+#endif
+
+
   // Initialize OLED
-  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-    Serial.println(F("SSD1306 allocation failed"));
-    while(1);
-  }
-  displayStatus("Booting...");
-  
+  //if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+  //  Serial.println(F("SSD1306 allocation failed"));
+  //  while(1);
+  //}
+  displayStatus("Booting...Next Sd Init");
+
   // Initialize EEPROM
   EEPROM.begin(EEPROM_SIZE);
   loadConfig();
@@ -139,25 +169,43 @@ void setup() {
 #else
   if (!SD.begin(SD_CS_PIN)) {
 #endif
+
     Serial.println("Card Mount Failed");
     setError("SD Card Init Failed");
+    // Reset TFT display pin manually
+    gfx->displayOn();
+    pinMode(1, OUTPUT);
+    digitalWrite(1, LOW);
+    delay(50);
+    digitalWrite(1, HIGH);
+    delay(50);
+
+    //init tft
+    gfx->begin();
+    digitalWrite(TFT_BL, LOW);
+    gfx->fillScreen(BACKGROUND);
+    gfx->displayOn();
+    digitalWrite(TFT_BL, HIGH);
+    displayStatus("SD Card Fail ");
+    gfx->displayOn();
+
     // Halt further operation since SD card is critical for recording/playback
     while (true) {
       delay(1000);
     }
   } else {
     Serial.println("SD Card Initialized");
-  Serial.println("SD Card Initialized successfully");
-  displayStatus("SD Card Ready");
+    Serial.println("SD Card Initialized successfully");
+    displayStatus("SD Card Ready");
   }
   // Initialize hardware
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   pinMode(CONFIG_PIN, INPUT_PULLUP);
   pinMode(I2S_SD, OUTPUT);
 #ifdef DISABLE_AUDIO_OUTPUT_ON_BOOT
-  digitalWrite(I2S_SD, LOW); // Disable amplifier on boot
+  digitalWrite(I2S_SD, LOW);  // Disable amplifier on boot
 #else
-  digitalWrite(I2S_SD, HIGH); // Enable amplifier
+  digitalWrite(I2S_SD, HIGH);  // Enable amplifier
 #endif
 
   // Check for config mode
@@ -168,7 +216,7 @@ void setup() {
 
   setupAudioHardware();
   // Removed automatic WiFi connect on boot to wait for WiFi selection via WiFi manager
-   connectToWiFi();
+  connectToWiFi();
 }
 
 void loop() {
@@ -179,7 +227,7 @@ void loop() {
 
   static unsigned long recordStartTime = 0;
   static unsigned long stateEnterTime = 0;
-  
+
   // State machine
   // Long-press detection for config mode
   static unsigned long configButtonPressTime = 0;
@@ -188,7 +236,7 @@ void loop() {
     if (!configButtonWasPressed) {
       configButtonPressTime = millis();
       configButtonWasPressed = true;
-    } else if (millis() - configButtonPressTime > 3000) { // 3 seconds hold
+    } else if (millis() - configButtonPressTime > 3000) {  // 3 seconds hold
       displayStatus("Entering WiFi Manager...");
       delay(500);
       if (!isConfigModeActive) {
@@ -200,48 +248,50 @@ void loop() {
     configButtonWasPressed = false;
   }
 
-  switch(currentState) {
+  switch (currentState) {
     case STATE_INIT:
       break;
-    case STATE_WIFI_CONNECTING: {
-      static int currentNetworkIndex = 0;
-      if(wifiMulti.run() == WL_CONNECTED) {
-        displayStatus("WiFi Connected to network #" + String(currentNetworkIndex + 1));
-        Serial.print("Connected to: ");
-        Serial.println(WiFi.SSID());
-        currentState = STATE_WIFI_CONNECTED;
-        stateEnterTime = millis();
-      } else if (millis() > stateEnterTime + 30000) { // 30s timeout
-        enterConfigMode();
-      } else {
-        // Update currentNetworkIndex based on which network is currently connected or being tried
-        // Note: WiFiMulti does not expose current index, so this is a best effort
-        currentNetworkIndex = (currentNetworkIndex + 1) % WIFI_MAX_NETWORKS;
+    case STATE_WIFI_CONNECTING:
+      {
+        static int currentNetworkIndex = 0;
+        if (wifiMulti.run() == WL_CONNECTED) {
+          displayStatus("WiFi Connected to network #" + String(currentNetworkIndex + 1));
+          Serial.print("Connected to: ");
+          Serial.println(WiFi.SSID());
+          currentState = STATE_WIFI_CONNECTED;
+          stateEnterTime = millis();
+        } else if (millis() > stateEnterTime + 30000) {  // 30s timeout
+          enterConfigMode();
+        } else {
+          // Update currentNetworkIndex based on which network is currently connected or being tried
+          // Note: WiFiMulti does not expose current index, so this is a best effort
+          currentNetworkIndex = (currentNetworkIndex + 1) % WIFI_MAX_NETWORKS;
+        }
+        break;
       }
-      break;
-    }
     case STATE_WIFI_CONNECTED:
-      if (millis() > stateEnterTime + 2000) { // Brief display of connection status
+      if (millis() > stateEnterTime + 2000) {  // Brief display of connection status
         displayStatus("Ready\nPress to record");
         currentState = STATE_READY;
       }
       break;
-    case STATE_READY: {
-      static unsigned long lastButtonPress = 0;
-      if(digitalRead(BUTTON_PIN) == LOW) {
-        unsigned long now = millis();
-        if (now - lastButtonPress > 200) { // 200ms debounce
-          displayStatus("Recording...");
-          currentState = STATE_RECORDING;
-          recordStartTime = now;
-          startRecording();
-          lastButtonPress = now;
+    case STATE_READY:
+      {
+        static unsigned long lastButtonPress = 0;
+        if (digitalRead(BUTTON_PIN) == LOW) {
+          unsigned long now = millis();
+          if (now - lastButtonPress > 200) {  // 200ms debounce
+            displayStatus("Recording...");
+            currentState = STATE_RECORDING;
+            recordStartTime = now;
+            startRecording();
+            lastButtonPress = now;
+          }
         }
+        break;
       }
-      break;
-    }
     case STATE_RECORDING:
-      if(millis() - recordStartTime >= RECORD_DURATION) {
+      if (millis() - recordStartTime >= RECORD_DURATION) {
         stopRecording();
         displayStatus("Processing speech...");
         currentState = STATE_PROCESSING_SPEECH;
@@ -266,13 +316,13 @@ void loop() {
     case STATE_PROCESSING_TTS:
       break;
     case STATE_PLAYING:
-      if(!isPlayingAudio) {
+      if (!isPlayingAudio) {
         currentState = STATE_READY;
         displayStatus("Ready\nPress to record");
       }
       break;
     case STATE_ERROR:
-      if (millis() > stateEnterTime + 5000) { // Show error for 5 seconds
+      if (millis() > stateEnterTime + 5000) {  // Show error for 5 seconds
         currentState = STATE_READY;
         displayStatus("Ready\nPress to record");
       }
@@ -309,7 +359,7 @@ void enterConfigMode() {
   // Removed event handler for client connection to WiFi AP due to compilation errors and user request
 
   displayStatus("Config Mode\nConnect to:\nESP32-VoiceAI\nThen visit:\n192.168.4.1");
-  
+
   server.on("/", HTTP_GET, []() {
     String html = R"=====(
     <html><head><title>ESP32 Voice Assistant</title>
@@ -339,12 +389,12 @@ void enterConfigMode() {
     <form method='post' action='/save'>
     <h3>WiFi Networks</h3>
     )=====";
-    
+
     for (int i = 0; i < WIFI_MAX_NETWORKS; i++) {
-      html += "<input type='text' name='ssid" + String(i+1) + "' placeholder='SSID " + String(i+1) + "' value='" + String(deviceConfig.ssids[i]) + "'><br>";
-      html += "<input type='password' name='pass" + String(i+1) + "' placeholder='Password " + String(i+1) + "'><br>";
+      html += "<input type='text' name='ssid" + String(i + 1) + "' placeholder='SSID " + String(i + 1) + "' value='" + String(deviceConfig.ssids[i]) + "'><br>";
+      html += "<input type='password' name='pass" + String(i + 1) + "' placeholder='Password " + String(i + 1) + "'><br>";
     }
-    
+
     html += R"=====(
     <h3>API Keys</h3>
     <input type='text' name='speech' placeholder='Google Speech API Key' value=')=====";
@@ -364,26 +414,26 @@ void enterConfigMode() {
     <div id='testResult'></div>
     </body></html>
     )=====";
-    
+
     server.send(200, "text/html", html);
   });
-  
+
   server.on("/save", HTTP_POST, []() {
     // Save WiFi credentials
     for (int i = 0; i < WIFI_MAX_NETWORKS; i++) {
-      if (server.hasArg("ssid" + String(i+1))) {
-        strncpy(deviceConfig.ssids[i], server.arg("ssid" + String(i+1)).c_str(), WIFI_CRED_MAX_LEN);
+      if (server.hasArg("ssid" + String(i + 1))) {
+        strncpy(deviceConfig.ssids[i], server.arg("ssid" + String(i + 1)).c_str(), WIFI_CRED_MAX_LEN);
       }
-      if (server.hasArg("pass" + String(i+1))) {
-        strncpy(deviceConfig.passwords[i], server.arg("pass" + String(i+1)).c_str(), WIFI_CRED_MAX_LEN);
+      if (server.hasArg("pass" + String(i + 1))) {
+        strncpy(deviceConfig.passwords[i], server.arg("pass" + String(i + 1)).c_str(), WIFI_CRED_MAX_LEN);
       }
     }
-    
+
     // Save API keys
     if (server.hasArg("speech")) strncpy(deviceConfig.googleSpeechApiKey, server.arg("speech").c_str(), API_KEY_LEN);
     if (server.hasArg("tts")) strncpy(deviceConfig.googleTtsApiKey, server.arg("tts").c_str(), API_KEY_LEN);
     if (server.hasArg("gemini")) strncpy(deviceConfig.geminiApiKey, server.arg("gemini").c_str(), API_KEY_LEN);
-    
+
     saveConfig();
     server.send(200, "text/plain", "Configuration saved. Connecting to WiFi...");
     // Connect to WiFi after saving config
@@ -394,7 +444,7 @@ void enterConfigMode() {
   server.on("/test/mic", HTTP_GET, []() {
     displayStatus("Testing mic... Please wait: recording 2 seconds");
     startRecording();
-    delay(5000); // Record 2 seconds
+    delay(5000);  // Record 2 seconds
     stopRecording();
     displayStatus("Playing back test recording... Please wait");
     playAudio("/recording.wav");
@@ -413,7 +463,7 @@ void enterConfigMode() {
       server.send(200, "text/plain", "No test audio available.");
     }
   });
-  
+
   server.begin();
 }
 
@@ -421,10 +471,10 @@ void connectToWiFi() {
   WiFi.mode(WIFI_STA);
   displayStatus("Connecting WiFi...");
   currentState = STATE_WIFI_CONNECTING;
-  
+
   // Clear existing networks
-  wifiMulti = WiFiMulti(); // Reset the WiFiMulti object
-  
+  wifiMulti = WiFiMulti();  // Reset the WiFiMulti object
+
   for (int i = 0; i < WIFI_MAX_NETWORKS; i++) {
     if (strlen(deviceConfig.ssids[i]) > 0) {
       wifiMulti.addAP(deviceConfig.ssids[i], deviceConfig.passwords[i]);
@@ -457,12 +507,12 @@ void setupAudioHardware() {
     .fixed_mclk = 0
   };
 
-i2s_pin_config_t mic_pins = {
-    .bck_io_num = I2S_SCK,  // bck_io_num
-    .ws_io_num = I2S_WS,   // ws_io_num
-    .data_out_num = I2S_PIN_NO_CHANGE, // data_out_num
-    .data_in_num = I2S_DIN,  // data_in_num
-};
+  i2s_pin_config_t mic_pins = {
+    .bck_io_num = I2S_SCK,              // bck_io_num
+    .ws_io_num = I2S_WS,                // ws_io_num
+    .data_out_num = I2S_PIN_NO_CHANGE,  // data_out_num
+    .data_in_num = I2S_DIN,             // data_in_num
+  };
 
   // Install and start I2S driver for microphone
   // Remove uninstall call to avoid error if driver not installed
@@ -485,12 +535,12 @@ i2s_pin_config_t mic_pins = {
     .fixed_mclk = 0
   };
 
-i2s_pin_config_t amp_pins = {
-    .bck_io_num = I2S_BCK,  // bck_io_num
-    .ws_io_num = I2S_WS,   // ws_io_num
-    .data_out_num = I2S_DOUT, // data_out_num
+  i2s_pin_config_t amp_pins = {
+    .bck_io_num = I2S_BCK,             // bck_io_num
+    .ws_io_num = I2S_WS,               // ws_io_num
+    .data_out_num = I2S_DOUT,          // data_out_num
     .data_in_num = I2S_PIN_NO_CHANGE,  // data_in_num
-};
+  };
 
   // Install and start I2S driver for amplifier
   // Remove uninstall call to avoid error if driver not installed
@@ -501,7 +551,7 @@ i2s_pin_config_t amp_pins = {
   Serial.println("Audio hardware initialized");
 }
 
-void writeWavHeader(File &file, uint32_t dataLength) {
+void writeWavHeader(File& file, uint32_t dataLength) {
   // WAV header is 44 bytes
   uint8_t header[44];
 
@@ -516,24 +566,24 @@ void writeWavHeader(File &file, uint32_t dataLength) {
 
   // fmt subchunk
   memcpy(header + 12, "fmt ", 4);
-  header[16] = 16; // Subchunk1Size for PCM
+  header[16] = 16;  // Subchunk1Size for PCM
   header[17] = 0;
   header[18] = 0;
   header[19] = 0;
-  header[20] = 1; // AudioFormat PCM = 1
+  header[20] = 1;  // AudioFormat PCM = 1
   header[21] = 0;
-  header[22] = 1; // NumChannels = 1 (mono)
+  header[22] = 1;  // NumChannels = 1 (mono)
   header[23] = 0;
   header[24] = (SAMPLE_RATE & 0xff);
   header[25] = ((SAMPLE_RATE >> 8) & 0xff);
   header[26] = ((SAMPLE_RATE >> 16) & 0xff);
   header[27] = ((SAMPLE_RATE >> 24) & 0xff);
-  uint32_t byteRate = SAMPLE_RATE * 2; // SampleRate * NumChannels * BitsPerSample/8
+  uint32_t byteRate = SAMPLE_RATE * 2;  // SampleRate * NumChannels * BitsPerSample/8
   header[28] = (byteRate & 0xff);
   header[29] = ((byteRate >> 8) & 0xff);
   header[30] = ((byteRate >> 16) & 0xff);
   header[31] = ((byteRate >> 24) & 0xff);
-  uint16_t blockAlign = 2; // NumChannels * BitsPerSample/8
+  uint16_t blockAlign = 2;  // NumChannels * BitsPerSample/8
   header[32] = (blockAlign & 0xff);
   header[33] = ((blockAlign >> 8) & 0xff);
   uint16_t bitsPerSample = 16;
@@ -563,7 +613,7 @@ void startRecording() {
     return;
   }
   // Write placeholder WAV header (44 bytes)
-  uint8_t emptyHeader[44] = {0};
+  uint8_t emptyHeader[44] = { 0 };
   audioFile.write(emptyHeader, 44);
   audioFile.flush();
 
@@ -600,37 +650,11 @@ void processSpeech() {
     return;
   }
 
-  // Read entire file into buffer for base64 encoding
-  size_t fileSize = file.size();
-  uint8_t* fileBuffer = (uint8_t*)malloc(fileSize);
-  if (!fileBuffer) {
-    setError("Memory allocation failed");
-    file.close();
-    return;
-  }
-
-  size_t bytesRead = file.read(fileBuffer, fileSize);
-  file.close();
-
-  if (bytesRead != fileSize) {
-    setError("Failed to read complete audio file");
-    free(fileBuffer);
-    return;
-  }
-
-  String audioBase64 = base64_encode(fileBuffer, fileSize);
-  free(fileBuffer);
-
-  Serial.print("Audio base64 length: ");
-  Serial.println(audioBase64.length());
-  if (audioBase64.length() == 0) {
-    setError("Audio data is empty");
-    return;
-  }
-
-  // Stream file and encode base64 in chunks to avoid large memory usage
+  // Read entire file into base64 string in chunks to avoid large memory usage
+  String audioBase64 = "";
   const size_t chunkSize = 512;
   uint8_t buffer[chunkSize];
+  size_t bytesRead = 0;
 
   while ((bytesRead = file.read(buffer, chunkSize)) > 0) {
     audioBase64 += base64_encode(buffer, bytesRead);
@@ -648,8 +672,7 @@ void processSpeech() {
   http.begin("https://speech.googleapis.com/v1/speech:recognize?key=" + String(deviceConfig.googleSpeechApiKey));
   http.addHeader("Content-Type", "application/json");
 
-  String payload = "{\"config\":{\"encoding\":\"LINEAR16\",\"sampleRateHertz\":" + String(SAMPLE_RATE) +
-                   ",\"languageCode\":\"en-US\"},\"audio\":{\"content\":\"" + audioBase64 + "\"}}";
+  String payload = "{\"config\":{\"encoding\":\"LINEAR16\",\"sampleRateHertz\":" + String(SAMPLE_RATE) + ",\"languageCode\":\"en-US\"},\"audio\":{\"content\":\"" + audioBase64 + "\"}}";
 
   Serial.print("Payload: ");
   Serial.println(payload);
@@ -685,21 +708,21 @@ void queryGemini(const String& query) {
   HTTPClient http;
   http.begin("https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=" + String(deviceConfig.geminiApiKey));
   http.addHeader("Content-Type", "application/json");
-  
+
   String payload = "{\"contents\":[{\"parts\":[{\"text\":\"" + query + "\"}]}]}";
-  
+
   int httpCode = http.POST(payload);
-  
+
   if (httpCode == HTTP_CODE_OK) {
     String response = http.getString();
     DynamicJsonDocument doc(4096);
     DeserializationError error = deserializeJson(doc, response);
-    
+
     if (!error && doc.containsKey("candidates")) {
       const char* aiResponse = doc["candidates"][0]["content"]["parts"][0]["text"];
       Serial.print("AI Response: ");
       Serial.println(aiResponse);
-      
+
       displayStatus("Converting to speech...");
       currentState = STATE_PROCESSING_TTS;
       textToSpeech(aiResponse);
@@ -709,77 +732,77 @@ void queryGemini(const String& query) {
   } else {
     setError("Gemini API: " + String(httpCode));
   }
-  
+
   http.end();
 }
 
 void textToSpeech(const String& text) {
-    HTTPClient http;
-    http.begin("https://texttospeech.googleapis.com/v1/text:synthesize?key=" + String(deviceConfig.googleTtsApiKey));
-    http.addHeader("Content-Type", "application/json");
-    
-    String payload = "{\"input\":{\"text\":\"" + text + "\"},\"voice\":{\"languageCode\":\"en-US\",\"name\":\"en-US-Wavenet-D\"},\"audioConfig\":{\"audioEncoding\":\"LINEAR16\",\"speakingRate\":1.0,\"pitch\":0.0}}";
-    
-    int httpCode = http.POST(payload);
-    
-    if (httpCode == HTTP_CODE_OK) {
-        String response = http.getString();
-        DynamicJsonDocument doc(4096);
-        DeserializationError error = deserializeJson(doc, response);
-        
-        if (!error && doc.containsKey("audioContent")) {
-            const char* audioContent = doc["audioContent"];
-            size_t decodedSize = calculateDecodedSize(audioContent);
-            uint8_t* decodedAudio = (uint8_t*)malloc(decodedSize);
-            
-            // Use the custom base64 decode function
-            int bytesDecoded = base64_decode(audioContent, decodedAudio);
-            
-            displayStatus("Playing response...");
-            currentState = STATE_PLAYING;
-            // Save decoded audio to SD card for playback
-            if (audioFile) {
-              audioFile.close();
-            }
-            audioFile = SD.open("/response.raw", FILE_WRITE);
-            if (audioFile) {
-              audioFile.write(decodedAudio, bytesDecoded);
-              audioFile.close();
-              playAudio("/response.raw");
-            } else {
-              setError("Failed to open response file");
-            }
-            
-            free(decodedAudio);
-        } else if (error) {
-            setError("JSON Parse Err: " + String(error.c_str()));
-        }
-    } else {
-        setError("TTS API: " + String(httpCode));
+  HTTPClient http;
+  http.begin("https://texttospeech.googleapis.com/v1/text:synthesize?key=" + String(deviceConfig.googleTtsApiKey));
+  http.addHeader("Content-Type", "application/json");
+
+  String payload = "{\"input\":{\"text\":\"" + text + "\"},\"voice\":{\"languageCode\":\"en-US\",\"name\":\"en-US-Wavenet-D\"},\"audioConfig\":{\"audioEncoding\":\"LINEAR16\",\"speakingRate\":1.0,\"pitch\":0.0}}";
+
+  int httpCode = http.POST(payload);
+
+  if (httpCode == HTTP_CODE_OK) {
+    String response = http.getString();
+    DynamicJsonDocument doc(4096);
+    DeserializationError error = deserializeJson(doc, response);
+
+    if (!error && doc.containsKey("audioContent")) {
+      const char* audioContent = doc["audioContent"];
+      size_t decodedSize = calculateDecodedSize(audioContent);
+      uint8_t* decodedAudio = (uint8_t*)malloc(decodedSize);
+
+      // Use the custom base64 decode function
+      int bytesDecoded = base64_decode(audioContent, decodedAudio);
+
+      displayStatus("Playing response...");
+      currentState = STATE_PLAYING;
+      // Save decoded audio to SD card for playback
+      if (audioFile) {
+        audioFile.close();
+      }
+      audioFile = SD.open("/response.raw", FILE_WRITE);
+      if (audioFile) {
+        audioFile.write(decodedAudio, bytesDecoded);
+        audioFile.close();
+        playAudio("/response.raw");
+      } else {
+        setError("Failed to open response file");
+      }
+
+      free(decodedAudio);
+    } else if (error) {
+      setError("JSON Parse Err: " + String(error.c_str()));
     }
-    
-    http.end();
+  } else {
+    setError("TTS API: " + String(httpCode));
+  }
+
+  http.end();
 }
 
 void playAudio(const char* filename) {
   isPlayingAudio = true;
-  
+
   File file = SD.open(filename, FILE_READ);
   if (!file) {
     setError("Failed to open audio file");
     isPlayingAudio = false;
     return;
   }
-  
+
   const size_t bufferSize = 512;
   uint8_t buffer[bufferSize];
   size_t bytesRead = 0;
   size_t bytesWritten = 0;
-  
+
   while ((bytesRead = file.read(buffer, bufferSize)) > 0) {
     i2s_write(I2S_NUM_1, buffer, bytesRead, &bytesWritten, portMAX_DELAY);
   }
-  
+
   file.close();
   isPlayingAudio = false;
 }
@@ -792,108 +815,144 @@ bool isAudioPlaying() {
 // Base64 Functions
 //========================================
 
-const char* base64_chars = 
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    "abcdefghijklmnopqrstuvwxyz"
-    "0123456789+/";
+const char* base64_chars =
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+  "abcdefghijklmnopqrstuvwxyz"
+  "0123456789+/";
 
 bool isBase64(unsigned char c) {
- return (isalnum(c) || (c == '+') || (c == '/'));
+  return (isalnum(c) || (c == '+') || (c == '/'));
 }
 
 int base64_decode(const char* input, uint8_t* output) {
-    int in_len = strlen(input);
-    int i = 0, j = 0, in_ = 0;
-    unsigned char char_array_4[4], char_array_3[3];
+  int in_len = strlen(input);
+  int i = 0, j = 0, in_ = 0;
+  unsigned char char_array_4[4], char_array_3[3];
 
-    while (in_len-- && (input[in_] != '=') && isBase64(input[in_])) {
-        char_array_4[i++] = input[in_]; in_++;
-        if (i ==4) {
-            for (i = 0; i < 4; i++)
-                char_array_4[i] = strchr(base64_chars, char_array_4[i]) - base64_chars;
-            char_array_3[0] = (char_array_4[0] << 2) + (char_array_4[1] >> 4);
-            char_array_3[1] = (char_array_4[1] << 4) + (char_array_4[2] >> 2);
-            char_array_3[2] = (char_array_4[2] << 6) + char_array_4[3];
-            for (i = 0; (i < 3); i++)
-                output[j++] = char_array_3[i];
-            i = 0;
-        }
+  while (in_len-- && (input[in_] != '=') && isBase64(input[in_])) {
+    char_array_4[i++] = input[in_];
+    in_++;
+    if (i == 4) {
+      for (i = 0; i < 4; i++)
+        char_array_4[i] = strchr(base64_chars, char_array_4[i]) - base64_chars;
+      char_array_3[0] = (char_array_4[0] << 2) + (char_array_4[1] >> 4);
+      char_array_3[1] = (char_array_4[1] << 4) + (char_array_4[2] >> 2);
+      char_array_3[2] = (char_array_4[2] << 6) + char_array_4[3];
+      for (i = 0; (i < 3); i++)
+        output[j++] = char_array_3[i];
+      i = 0;
     }
+  }
 
-    if (i) {
-        for (int k = i; k < 4; k++)
-            char_array_4[k] = 0;
-        for (int k = 0; k < 4; k++)
-            char_array_4[k] = strchr(base64_chars, char_array_4[k]) - base64_chars;
-        char_array_3[0] = (char_array_4[0] << 2) + (char_array_4[1] >> 4);
-        char_array_3[1] = (char_array_4[1] << 4) + (char_array_4[2] >> 2);
-        for (int k = 0; (k < i - 1); k++) output[j++] = char_array_3[k];
-    }
+  if (i) {
+    for (int k = i; k < 4; k++)
+      char_array_4[k] = 0;
+    for (int k = 0; k < 4; k++)
+      char_array_4[k] = strchr(base64_chars, char_array_4[k]) - base64_chars;
+    char_array_3[0] = (char_array_4[0] << 2) + (char_array_4[1] >> 4);
+    char_array_3[1] = (char_array_4[1] << 4) + (char_array_4[2] >> 2);
+    for (int k = 0; (k < i - 1); k++) output[j++] = char_array_3[k];
+  }
 
-    return j;
+  return j;
 }
 
 String base64_encode(const uint8_t* data, size_t input_length) {
-    String output;
-    int i = 0;
-    int j = 0;
-    unsigned char char_array_3[3];
-    unsigned char char_array_4[4];
+  String output;
+  int i = 0;
+  int j = 0;
+  unsigned char char_array_3[3];
+  unsigned char char_array_4[4];
 
-    while (input_length--) {
-        char_array_3[i++] = *(data++);
-        if (i == 3) {
-            char_array_4[0] = (char_array_3[0] & 0xfc) >> 2;
-            char_array_4[1] = ((char_array_3[0] & 0x03) << 4) + ((char_array_3[1] & 0xf0) >> 4);
-            char_array_4[2] = ((char_array_3[1] & 0x0f) << 2) + ((char_array_3[2] & 0xc0) >> 6);
-            char_array_4[3] = char_array_3[2] & 0x3f;
+  while (input_length--) {
+    char_array_3[i++] = *(data++);
+    if (i == 3) {
+      char_array_4[0] = (char_array_3[0] & 0xfc) >> 2;
+      char_array_4[1] = ((char_array_3[0] & 0x03) << 4) + ((char_array_3[1] & 0xf0) >> 4);
+      char_array_4[2] = ((char_array_3[1] & 0x0f) << 2) + ((char_array_3[2] & 0xc0) >> 6);
+      char_array_4[3] = char_array_3[2] & 0x3f;
 
-            for (i = 0; (i < 4); i++)
-                output += base64_chars[char_array_4[i]];
-            i = 0;
-        }
+      for (i = 0; (i < 4); i++)
+        output += base64_chars[char_array_4[i]];
+      i = 0;
     }
+  }
 
-    if (i) {
-        for (int k = i; k < 3; k++)
-            char_array_3[k] = '\0';
+  if (i) {
+    for (int k = i; k < 3; k++)
+      char_array_3[k] = '\0';
 
-        char_array_4[0] = (char_array_3[0] & 0xfc) >> 2;
-        char_array_4[1] = ((char_array_3[0] & 0x03) << 4) + ((char_array_3[1] & 0xf0) >> 4);
-        char_array_4[2] = ((char_array_3[1] & 0x0f) << 2) + ((char_array_3[2] & 0xc0) >> 6);
-        for (int k = 0; (k < i + 1); k++)
-            output += base64_chars[char_array_4[k]];
+    char_array_4[0] = (char_array_3[0] & 0xfc) >> 2;
+    char_array_4[1] = ((char_array_3[0] & 0x03) << 4) + ((char_array_3[1] & 0xf0) >> 4);
+    char_array_4[2] = ((char_array_3[1] & 0x0f) << 2) + ((char_array_3[2] & 0xc0) >> 6);
+    for (int k = 0; (k < i + 1); k++)
+      output += base64_chars[char_array_4[k]];
 
-        while ((i++ < 3))
-            output += '=';
-    }
+    while ((i++ < 3))
+      output += '=';
+  }
 
-    return output;
+  return output;
 }
 
 size_t calculateDecodedSize(const char* base64String) {
-    size_t length = strlen(base64String);
-    size_t padding = 0;
+  size_t length = strlen(base64String);
+  size_t padding = 0;
 
-    if (length > 0 && base64String[length - 1] == '=') padding++;
-    if (length > 1 && base64String[length - 2] == '=') padding++;
+  if (length > 0 && base64String[length - 1] == '=') padding++;
+  if (length > 1 && base64String[length - 2] == '=') padding++;
 
-    return (length * 3) / 4 - padding;
+  return (length * 3) / 4 - padding;
 }
 
 void displayStatus(const String& message) {
-    Serial.print("[STATUS] ");
-    Serial.println(message);
-    display.clearDisplay();
-    display.setTextSize(1);
-    display.setTextColor(SSD1306_WHITE);
-    display.setCursor(0, 0);
-    display.println(message);
-    display.display();
+  Serial.print("[STATUS] ");
+  Serial.println(message);
+
+  // Reset TFT display pin manually to clear display
+  gfx->displayOn();
+  pinMode(1, OUTPUT);
+  digitalWrite(1, LOW);
+  delay(50);
+  digitalWrite(1, HIGH);
+  delay(50);
+
+  //init tft
+  gfx->begin();
+  digitalWrite(TFT_BL, LOW);
+  gfx->fillScreen(BACKGROUND);
+  gfx->displayOn();
+  digitalWrite(TFT_BL, HIGH);
+
+  gfx->setTextSize(2);
+  gfx->setTextColor(WHITE);
+  int16_t x = 0;
+  int16_t y = 0;
+  gfx->setCursor(x, y);
+
+  // Split message by newline and print each line separately
+  int start = 0;
+  int end = message.indexOf('\n');
+  while (end != -1) {
+    String line = message.substring(start, end);
+    gfx->print(line);
+    y += 16;  // Approximate line height for text size 2
+    gfx->setCursor(x, y);
+    start = end + 1;
+    end = message.indexOf('\n', start);
+  }
+  // Print the last line
+  String line = message.substring(start);
+  gfx->print(line);
+
+  gfx->displayOn();
 }
 
 void setError(const String& message) {
-    errorMessage = message;
-    displayStatus("Error: " + message);
-    currentState = STATE_ERROR;
+  errorMessage = message;
+  Serial.print("[ERROR] ");
+  Serial.println(message);
+  // Removed displayStatus call to avoid OLED usage
+  // displayStatus("Error: " + message);
+  currentState = STATE_ERROR;
 }
