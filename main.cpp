@@ -69,7 +69,7 @@ typedef struct {
   uint16_t magic;
   char ssids[WIFI_MAX_NETWORKS][WIFI_CRED_MAX_LEN];
   char passwords[WIFI_MAX_NETWORKS][WIFI_CRED_MAX_LEN];
-  char googleSpeechApiKey[API_KEY_LEN] = "AIzaSyDIYlKX1iuUK3bVRa6g6YV_ZnEr3_2lNl8";
+  char googleSpeechApiKey[API_KEY_LEN] = "xxxxx";
   char googleTtsApiKey[API_KEY_LEN];
   char geminiApiKey[API_KEY_LEN];
 } DeviceConfig;
